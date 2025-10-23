@@ -35,8 +35,9 @@ def generate_channel(para):
     # Generate channels for each user
     for k in range(K):
         # Calculate the channel coefficient and ensure it's a scalar
-        beta = (np.sqrt(1/para['noise']) * para['rho_0'] / r[k] * 
-                np.exp(-1j * 2 * np.pi * para['f']/para['c'] * r[k]))
+        # *** CORRECTION: Removed 'np.sqrt(1/para['noise'])' from beta calculation.
+        # The channel gain should not be dependent on receiver noise.
+        beta = (para['rho_0'] / r[k] * np.exp(-1j * 2 * np.pi * para['f']/para['c'] * r[k]))
         
         # Get the beamfocusing vector and ensure it's a 1D array before assignment
         bf_vec = beamfocusing(para, r[k], theta[k])
@@ -48,9 +49,7 @@ def generate_channel(para):
     
     # Generate random reflection coefficient
     beta_reflection = np.sqrt(1/2) * (np.random.randn() + 1j * np.random.randn())
-    beta_s = (np.sqrt(para['rho_0']) / (2 * r_s) * 
-              np.exp(-1j * 2 * np.pi * para['f']/para['c'] * 2 * r_s) * 
-              beta_reflection)
+    beta_s = (np.sqrt(para['rho_0']) / (2 * r_s) * np.exp(-1j * 2 * np.pi * para['f']/para['c'] * 2 * r_s) * beta_reflection)
     
     # Calculate target response matrix
     a = beamfocusing(para, r_s, theta_s)

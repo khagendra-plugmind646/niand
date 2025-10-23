@@ -22,7 +22,11 @@ def SDR_fully_digital(para, H, beta_s, scale):
     
     # Define optimization variables
     F = [cp.Variable((N, N), hermitian=True) for _ in range(K)]
-    U = cp.Variable((2, 2), hermitian=True)
+    
+    # *** CORRECTION: U must be real and symmetric, not complex hermitian,
+    # as it corresponds to the real-valued J_11 block.
+    U = cp.Variable((2, 2), symmetric=True) 
+    
     Rx = cp.Variable((N, N), hermitian=True)
     
     # Get FIM blocks
@@ -48,82 +52,90 @@ def SDR_fully_digital(para, H, beta_s, scale):
         
         # Rate constraint with relaxation
         hk_herm = hk.conj().T
-        rate_factor = float(2**para['Rmin'] - 1) if 'Rmin' in para else 0.1  # Default to 0.1 if not specified
+        rate_factor = float(2**para['Rmin'] - 1) if 'Rmin' in para else 0.1
         signal_term = cp.real(cp.trace(Fk @ np.outer(hk, hk_herm)))
         interference_term = cp.real(cp.trace((Rx - Fk) @ np.outer(hk, hk_herm)))
-        noise_var = 1.0  # Assuming unit noise variance
+        
+        # *** CORRECTION: Use the actual noise power from parameters, not 1.0.
+        # This ensures consistency with rate_calculator.py.
+        noise_var = para['noise'] 
+        
         constraints.append(signal_term >= rate_factor * (interference_term + noise_var) - 1e-3)
     
-    # Power constraint with small relaxation
-    if 'Pt' in para:
-        constraints.append(cp.real(cp.trace(Rx)) <= para['Pt'] * 1.1)  # 10% relaxation
-    else:
-        # Default power constraint if not specified
-        constraints.append(cp.real(cp.trace(Rx)) <= 1.0)
+    # Power constraint
+    # *** CORRECTION: Use 'Pmax' (normalized power) not 'Pt'.
+    # Removed arbitrary 1.1x relaxation.
+    constraints.append(cp.real(cp.trace(Rx)) <= para['Pmax'])
     
     # Covariance constraint
     F_sum = sum(F)
     constraints.append(Rx - F_sum >> 0)
     
     # Define and solve the problem
-    # Ensure we're working with real values for the objective
-    obj = cp.Minimize(cp.trace(cp.inv_pos(cp.real(U))))
+    # *** CORRECTION: U is now real, so cp.inv_pos(U) is correct.
+    # We no longer need cp.real(U)
+    obj = cp.Minimize(cp.trace(cp.inv_pos(U)))
     prob = cp.Problem(obj, constraints)
     
-    # Try different solvers in order of preference with more relaxed parameters
+    # Try different solvers
     solvers = []
-    # Try SCS with relaxed parameters
     solvers.append((cp.SCS, {
-        'verbose': True,
-        'max_iters': 2000,  # Increased max iterations
-        'eps': 1e-2,       # Relaxed tolerance
-        'alpha': 1.2,      # Relaxed step size
-        'scale': 5.0,      # Scale parameter
-        'normalize': True,
-        'use_indirect': False,  # Use direct solver (more stable but slower)
-        'warm_start': True,     # Use warm start
-        'acceleration_lookback': 5  # Reduce lookback for stability
+        'verbose': False, # Set to True for detailed solver output
+        'max_iters': 2500,
+        'eps': 1e-3, # Slightly tighter tolerance
     }))
     
-    # Try other available solvers
+    if 'MOSEK' in cp.installed_solvers():
+        # MOSEK is the best solver for this if available
+        solvers.insert(0, (cp.MOSEK, {'verbose': False}))
+
     if 'CLARABEL' in cp.installed_solvers():
-        solvers.append((cp.CLARABEL, {'verbose': True, 'tol_gap_abs': 1e-3, 'tol_gap_rel': 1e-3}))
-    if 'OSQP' in cp.installed_solvers():
-        solvers.append((cp.OSQP, {'verbose': True, 'eps_abs': 1e-3, 'eps_rel': 1e-3, 'max_iter': 5000}))
+        solvers.append((cp.CLARABEL, {'verbose': False, 'tol_gap_abs': 1e-3, 'tol_gap_rel': 1e-3}))
     
     solution_found = False
     for solver, solver_params in solvers:
         try:
-            if isinstance(solver, str):
-                solver_name = solver
-            else:
-                solver_name = solver.__name__.split('.')[-1]
-            print(f"\n  - Trying {solver_name} solver... ", end="", flush=True)
+            solver_name = solver if isinstance(solver, str) else solver.__name__.split('.')[-1]
+            # print(f"\n  - Trying {solver_name} solver... ", end="", flush=True) # Uncomment for debug
             
             prob.solve(solver=solver, **solver_params)
+            
             if prob.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                print(f"solved with status: {prob.status}")
+                # print(f"solved with status: {prob.status}") # Uncomment for debug
                 solution_found = True
                 break
             else:
-                print(f"failed with status: {prob.status}")
+                # print(f"failed with status: {prob.status}") # Uncomment for debug
+                pass
         except Exception as e:
-            print(f"failed: {str(e)[:100]}")
+            # print(f"failed: {str(e)[:100]}") # Uncomment for debug
+            pass
     
     if not solution_found:
-        print("\n  - All solvers failed. Check the problem formulation or constraints.")
+        # print("\n  - All solvers failed.") # Uncomment for debug
         return None, None
     
+    # Check if variables have valid values
+    if Rx.value is None or any(Fk.value is None for Fk in F):
+        # print("\n  - Solver reported success but solution is invalid.") # Uncomment for debug
+        return None, None
+
     # Construct rank-one solution
     f = np.zeros((N, K), dtype=complex)
     for k in range(K):
         hk = H[:, k]
         Fk = F[k].value
         if Fk is not None:
-            # Handle potential numerical issues with small eigenvalues
-            w, v = np.linalg.eigh(Fk)
-            # Take the eigenvector corresponding to the largest eigenvalue
-            fk = np.sqrt(w[-1]) * v[:, -1]
-            f[:, k] = fk
+            try:
+                # Handle potential numerical issues with small eigenvalues
+                w, v = np.linalg.eigh(Fk)
+                # Take the eigenvector corresponding to the largest eigenvalue
+                if w[-1] > 1e-10: # Only proceed if eigenvalue is meaningfully positive
+                    fk = np.sqrt(w[-1]) * v[:, -1]
+                    f[:, k] = fk
+                else:
+                    f[:, k] = np.zeros(N) # Set to zero if Fk is effectively zero
+            except np.linalg.LinAlgError:
+                f[:, k] = np.zeros(N)
     
     return Rx.value, f
