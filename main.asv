@@ -1,0 +1,45 @@
+clc
+clear all
+close all
+
+addpath('./functions');
+%cvx_solver mosek
+
+
+para = para_init();
+
+[H, G, beta_s, r, theta, r_s, theta_s] = generate_channel(para);
+scale = 1e2; % if the optimization fails, try to adjust this scale factor
+
+% Optimize the transmit waveform
+[Rx, f] = SDR_fully_digital(para, H, beta_s, scale);
+% Ensure transmit power constraint
+
+Rx = Rx / trace(Rx) * para.Pmax;
+
+numUsers = 2:10;     
+numTrials = 3;      % average over 50 random channels
+sumRates = zeros(size(numUsers));
+
+for idx = 1:length(numUsers)
+    para.K = numUsers(idx);
+    avgRate = 0;
+    for trial = 1:numTrials
+        [H, G, beta_s, r, theta, r_s, theta_s] = generate_channel(para);
+        [Rx, f] = SDR_fully_digital(para, H, beta_s, scale);
+
+        % Normalize power
+        Rx = Rx / trace(Rx) * para.Pmax;
+
+        rate = rate_calculator(para, H, Rx, f);
+        avgRate = avgRate + sum(rate);
+    end
+    sumRates(idx) = avgRate / numTrials;  % average over trials
+end
+
+figure;
+plot(numUsers, sumRates, '-o','LineWidth',1.5);
+xlabel('Number of Users');
+ylabel('Average Sum Rate (bits/s/Hz)');
+title('SDMA Sum Rate vs Number of Users');
+grid on;
